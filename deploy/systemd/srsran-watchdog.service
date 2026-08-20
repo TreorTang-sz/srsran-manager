@@ -1,0 +1,26 @@
+# srsRAN Manager Watchdog 服务 —— 独立于 Web 运行。
+# Web (srsran-manager) 挂掉不影响本服务; 反之亦然。
+# 通过共享 SQLite (kv_state 表) 与 Web 进程协调 desired_running 等状态。
+[Unit]
+Description=srsRAN Manager Watchdog (health monitor + auto recovery)
+After=network.target
+Wants=network.target
+# 弱依赖: 基站服务先于看门狗启动时, 看门狗负责后续健康监控
+After=srsran-epc.service srsran-enb.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/srsran-manager/backend
+Environment=SRSRAN_CONFIG=/etc/srsran-manager/config.yaml
+Environment=SRSRAN_WATCHDOG_ONLY=1
+ExecStart=/opt/srsran-manager/backend/.venv/bin/python -m app.watchdog_runner
+Restart=always
+RestartSec=3
+# 看门狗需要 systemctl 控制基站服务 -> 以 root 运行并收紧能力
+CapabilityBoundingSet=CAP_SYS_BOOT CAP_KILL CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

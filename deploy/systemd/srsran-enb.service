@@ -1,0 +1,22 @@
+# srsENB 服务单元 —— 仅负责进程生命周期（同 srsran-epc.service 的说明）。
+[Unit]
+Description=srsRAN eNodeB (Base Station)
+# eNB 依赖 EPC 的 S1 接口, 但不硬性 Requires: EPC 由看门狗独立监控恢复,
+# EPC 短暂重启不应连累 eNB 进程（S1 断开由看门狗健康检查处理）。
+After=network.target srsran-epc.service
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/srsenb
+WorkingDirectory=/etc/srsran
+Restart=no
+# 硬化: UHD/USRP 需要实时性与 USB 访问
+LimitMEMLOCK=infinity
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,94 @@
+# srsRAN Manager 配置示例
+#
+# 复制到 config/config.yaml（或 /etc/srsran-manager/config.yaml）后修改。
+# 加载顺序: 内置默认值 -> 本配置文件 -> 环境变量（后者覆盖前者）。
+#
+# 环境变量:
+#   SRSRAN_MODE          auto | mock | linux
+#   SRSRAN_API_TOKEN     控制接口的 API Token（也可写在本文件中）
+#   SRSRAN_DB_PATH       SQLite 数据库路径
+#   SRSRAN_HOST / SRSRAN_PORT   Web 绑定地址
+#   SRSRAN_WATCHDOG_ONLY=1      仅运行看门狗（无 Web）
+#   SRSRAN_MANAGER_ONLY=1       仅运行 Web（看门狗由独立 systemd 服务运行）
+#
+# 密钥禁止硬编码进代码：Token 只能来自本文件或环境变量。
+
+mode: auto                     # auto: Linux 上自动选择 linux，Windows 上选择 mock
+
+log_level: INFO
+
+server:
+  host: 0.0.0.0                # 局域网浏览器可访问
+  port: 8080
+
+# ---------------------------------------------------------------------------
+# 看门狗
+# ---------------------------------------------------------------------------
+watchdog:
+  run_watchdog: true
+  run_monitor: true
+  auto_start: true             # 无人值守：服务启动即自动拉起 LTE 网络
+  check_interval: 1.0          # 健康检查周期（秒）
+  monitor_interval: 1.0        # 指标采样周期（秒）
+  start_timeout: 30.0          # STARTING -> 判定启动失败的超时
+  recovery_cooldown: 5.0       # 两次恢复尝试之间的最小间隔
+  max_recovery_attempts: 3     # 连续失败上限，超过进入 FAULT（禁止无限重启）
+  verify_delay: 4.0            # 恢复动作后的验证等待
+
+# 软阈值（超过仅进入 WARNING，不触发重启）
+thresholds:
+  cpu_warning: 85.0
+  memory_warning: 85.0
+  disk_warning: 90.0
+  temperature_warning: 75.0
+
+# ---------------------------------------------------------------------------
+# 数据库与安全
+# ---------------------------------------------------------------------------
+database:
+  path: data/srsran_manager.db
+  event_retention_days: 30
+
+security:
+  # 控制接口 Token。生产环境必须设置（留空则控制接口全部禁用）。
+  # 生成方式: python -c "import secrets; print(secrets.token_hex(16))"
+  api_token: "CHANGE-ME-GENERATE-A-RANDOM-TOKEN"
+  dev_fault_api: true          # 故障注入 API；mock 模式自动启用，生产建议 false
+
+# ---------------------------------------------------------------------------
+# Linux 生产环境（mock 模式忽略本节）
+# ---------------------------------------------------------------------------
+linux:
+  services:
+    epc: srsran-epc            # systemd unit 名称
+    enb: srsran-enb
+
+  usrp:
+    check_interval: 10.0       # uhd_find_devices 较慢，做缓存
+    find_cmd: uhd_find_devices
+
+  metrics:
+    source: file               # file: tail srsENB metrics CSV; journal: journalctl
+    enb_metrics_file: /var/log/srsran/enb_metrics.csv
+    journal_unit: srsran-enb
+    bitrate_scale: 1.0         # 源指标单位为 bps 时设为 1.0（部署时按版本校准）
+
+  s1:
+    method: sctp               # sctp: 内核 SCTP 关联检查（推荐）; log: journal 匹配
+    sctp_port: 36412
+    journal_unit: srsran-enb
+
+  core_traffic:
+    interfaces:                # 承载核心网用户流量的接口（srsEPC SGi / S1-U）
+      - srs_spgw_sgi
+
+# ---------------------------------------------------------------------------
+# Mock 模式（仅开发/演示环境生效）
+# ---------------------------------------------------------------------------
+mock:
+  start_delay: 1.5
+  stop_delay: 0.3
+  s1_connect_delay: 1.0
+  ue_attach_probability: 0.10
+  ue_detach_probability: 0.03
+  max_ues: 5

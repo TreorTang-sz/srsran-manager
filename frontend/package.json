@@ -1,0 +1,21 @@
+{
+  "name": "srsran-manager-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "echarts": "^5.5.0",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.2.0",
+    "vue-tsc": "^2.0.0"
+  }
+}

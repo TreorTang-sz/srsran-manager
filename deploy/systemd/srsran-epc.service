@@ -1,0 +1,23 @@
+# srsEPC 服务单元 —— 仅负责进程生命周期。
+# 恢复决策统一由 srsran-watchdog 做出（有限次数恢复, 避免无限重启）,
+# 因此本单元不配置 Restart=on-failure; 进程崩溃后由看门狗在下一个
+# 检查周期内发现并通过 systemctl 拉起（计入恢复次数上限）。
+[Unit]
+Description=srsRAN EPC (Core Network)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/srsepc
+WorkingDirectory=/etc/srsran
+Restart=no
+# 硬化: 最小权限运行（srsepc 需要创建 TUN/网络接口, 保持 root 但收紧能力）
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+# 日志交给 journald, Watchdog 的 journal Provider 可读取
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
