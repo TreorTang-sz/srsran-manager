@@ -197,6 +197,14 @@ class LogStateAggregator:
                 self._publish(EventType.CONFIG_ERROR, Severity.CRITICAL,
                               f"S1 Setup Failure — cause: {cause} "
                               f"(config mismatch, restart will not help)")
+            elif n == LogEventName.RF_INIT_ERROR:
+                # 可恢复的 RF 初始化失败（B210 USB 句柄未释放 / USB 抖动）：
+                # 实机表现是 eNB 随即退出（status=255），看门狗按"进程死亡"
+                # 走正常恢复（重启 eNB 即可），绝不能进 CONFIG_ERROR/FAULT。
+                self._s.usrp_log_error = "RF init failed (uhd_init failed)"
+                self._publish(EventType.USRP_DISCONNECTED, Severity.ERROR,
+                              "RF init failed — UHD could not open the device; "
+                              "eNB will exit, watchdog recovers by restart")
             elif n == LogEventName.UHD_NO_DEVICE:
                 self._s.usrp_log_error = "No UHD Devices Found"
                 self._publish(EventType.USRP_DISCONNECTED, Severity.ERROR,
