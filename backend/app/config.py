@@ -80,7 +80,7 @@ class StageTimeoutsConfig:
                            不等于启动失败，不应立即重启）
     """
     epc_ready_timeout: float = 45.0
-    enb_rf_timeout: float = 90.0
+    enb_rf_timeout: float = 180.0    # RK3588 + B210 大 PRB 初始化实测较慢
     enb_running_timeout: float = 60.0
     s1_ready_timeout: float = 30.0
     s1_reconnect_grace: float = 10.0
