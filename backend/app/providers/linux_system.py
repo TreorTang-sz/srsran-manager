@@ -117,7 +117,8 @@ class LinuxSystemMetricsProvider:
             usage = shutil.disk_usage("/")
             disk_total = usage.total / 1024 ** 3
             disk_used = usage.used / 1024 ** 3
-            disk_percent = usage.percent
+            # shutil.disk_usage 没有 .percent 属性（那是 psutil 的），手动计算
+            disk_percent = usage.used / usage.total * 100.0 if usage.total else 0.0
         except OSError:
             pass
 
@@ -125,7 +126,7 @@ class LinuxSystemMetricsProvider:
         disk_stats = self._read_diskstats()
         dr = dw = 0.0
         if self._last_disk_stats:
-            prev_total = [sum(v) for v in zip(*self._last_diskstats.values())] if self._last_diskstats else [0, 0]
+            prev_total = [sum(v) for v in zip(*self._last_disk_stats.values())] if self._last_disk_stats else [0, 0]
             cur_total = [sum(v) for v in zip(*disk_stats.values())] if disk_stats else [0, 0]
             dr = (cur_total[0] - prev_total[0]) * 512 / dt / 1024 ** 2
             dw = (cur_total[1] - prev_total[1]) * 512 / dt / 1024 ** 2
