@@ -2,7 +2,7 @@
 
 Ubuntu srsRAN 4G 基站服务器的管理、监控与看门狗系统。面向 **ARM64 / RK3588 / Ubuntu 20.04 或 22.04 / USRP B210** 无头（无显示器/键盘）运行环境，日常管理完全通过浏览器完成。
 
-**当前版本：v2.0.0**（变更历史见 [CHANGELOG.md](CHANGELOG.md)；版本号以 `backend/app/__init__.py` 为准，`/api/status` 与前端顶栏均会显示）
+**当前版本：v2.0.1**（变更历史见 [CHANGELOG.md](CHANGELOG.md)；版本号以 `backend/app/__init__.py` 为准，`/api/status` 与前端顶栏均会显示）
 
 ```
 ┌────────────────────────── 浏览器 (PC / 手机) ──────────────────────────┐
@@ -104,12 +104,18 @@ REST API + Token 鉴权、看门狗端到端（崩溃恢复 / S1 断开 / B210 �
 
 ## 部署到 Ubuntu（RK3588）
 
+> **完整部署指南见 [docs/deployment.md](docs/deployment.md)** —— 前置条件、一条命令部署、
+> 部署后验证、校准清单、日常运维、FAULT 处理、升级版本、常见问题。
+
 支持 Ubuntu 20.04（Python 3.8）与 22.04（Python 3.10），安装脚本会自动安装缺失的
 `python3-venv`/`rsync`、检测 `srsepc`/`srsenb` 实际路径并写入 systemd 单元。
 
 ```bash
 # 在服务器上（已安装 srsRAN + UHD）
+git clone https://github.com/TreorTang-sz/srsran-manager.git
+cd srsran-manager
 sudo ./deploy/install.sh
+# 完成后: 浏览器打开 http://<服务器IP>:8080, 填入终端打印的 API Token
 ```
 
 安装脚本会：

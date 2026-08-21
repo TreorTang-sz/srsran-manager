@@ -4,6 +4,21 @@
 版本唯一权威定义在 `backend/app/__init__.py` 的 `__version__`，
 git tag 与 GitHub Release 与之保持一致（API `/api/status` 与前端顶栏均显示该版本）。
 
+## [2.0.1] - 2026-08-21
+
+### 新增
+
+- **完整部署指南** `docs/deployment.md`：前置条件检查表、一条命令部署、
+  部署后验证（服务/日志/Web/curl）、按环境校准清单、日常运维命令、
+  FAULT 处理流程、版本升级步骤、常见问题（S1 不通/USRP 显示/Token 丢失等）、
+  排障用架构图
+- README 部署章节重写并链接部署指南
+
+### 修正
+
+- `config.example.yaml`：移除 v1 遗留的 `start_timeout`（v2 已改分阶段超时），
+  补充 `watchdog.stages.*` 与 `linux.logs.*`（journalctl 日志源配置）注释说明
+
 ## [2.0.0] - 2026-08-21
 
 ### 破坏性变更（看门狗判定体系重构）

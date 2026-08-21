@@ -30,10 +30,23 @@ watchdog:
   auto_start: true             # 无人值守：服务启动即自动拉起 LTE 网络
   check_interval: 1.0          # 健康检查周期（秒）
   monitor_interval: 1.0        # 指标采样周期（秒）
-  start_timeout: 30.0          # STARTING -> 判定启动失败的超时
   recovery_cooldown: 5.0       # 两次恢复尝试之间的最小间隔
   max_recovery_attempts: 3     # 连续失败上限，超过进入 FAULT（禁止无限重启）
   verify_delay: 4.0            # 恢复动作后的验证等待
+
+  # 分阶段启动超时（v2：取代旧的统一 start_timeout）。
+  # 每个阶段等待对应的真实日志证据，超时才判定该阶段失败：
+  #   EPC 就绪     —— 7 条 "Initialized" 日志齐全
+  #   eNB RF 打开  —— "RF device 'UHD' successfully opened"（B210 慢，放宽）
+  #   eNodeB 启动  —— "==== eNodeB started ==="
+  #   S1 就绪      —— "Sending S1 Setup Response"
+  #   S1 重连宽限  —— S1_LOST 后先等 eNB 自行重连（SCTP Shutdown ≠ 启动失败）
+  stages:
+    epc_ready_timeout: 45.0
+    enb_rf_timeout: 90.0
+    enb_running_timeout: 60.0
+    s1_ready_timeout: 30.0
+    s1_reconnect_grace: 10.0
 
 # 软阈值（超过仅进入 WARNING，不触发重启）
 thresholds:
@@ -81,6 +94,15 @@ linux:
   core_traffic:
     interfaces:                # 承载核心网用户流量的接口（srsEPC SGi / S1-U）
       - srs_spgw_sgi
+
+  logs:
+    # journalctl 日志源 —— v2 看门狗的核心判定依据。
+    # 单元名须与 systemd 中 srsRAN 服务单元一致。
+    enb_unit: srsran-enb
+    epc_unit: srsran-epc
+    # 首次拉取的历史窗口（秒）：看门狗重启后从既有日志恢复组件状态，
+    # 无需重启基站
+    boot_history_s: 300
 
 # ---------------------------------------------------------------------------
 # Mock 模式（仅开发/演示环境生效）
