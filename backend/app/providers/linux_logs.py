@@ -4,8 +4,10 @@ DEPLOYMENT STATUS: 基于 journalctl JSON 输出编写，ARM64 Ubuntu 20.04/22.0
 的 systemd-journald 均支持；首次部署需在实机验证单元名与 MESSAGE 字段。
 
 策略：
-  * 首次 poll 拉取最近 boot_history_s 秒的历史日志 —— 看门狗重启后能
-    从既有日志恢复 enb_stage / epc_stage / s1_state（无需重启基站）。
+  * 首次 poll 拉取本次开机以来该单元的全部日志（journalctl -b）——
+    看门狗重启后能从既有日志恢复 enb_stage / epc_stage / s1_state。
+    不能用固定时间窗口：EPC 可能已连续运行数小时，其 Initialized
+    日志早于任何有限窗口 → 聚合器会误判 EPC 未就绪（实机踩坑）。
   * 之后增量拉取（--since 上次时间 - 2s 重叠窗口），按 (ts, message) 去重。
   * journalctl 调用失败时记录错误并返回空列表 —— 日志不可用会被
     阶段超时兜底（health 判定依赖日志证据）。
@@ -42,16 +44,21 @@ class LinuxJournalLogSource(LogSource):
         return self._last_error
 
     # ------------------------------------------------------------------
-    def _fetch(self, since_epoch: float) -> list[LogLine]:
+    def _fetch(self, since_epoch: Optional[float]) -> list[LogLine]:
         cmd = [
             "journalctl",
             "-u", self._cfg.enb_unit,
             "-u", self._cfg.epc_unit,
-            "--since", f"@{since_epoch:.3f}",
             "-o", "json",
             "--no-pager",
-            "-n", "4000",
+            "-n", "20000",
         ]
+        if since_epoch is None:
+            # 首次拉取：本次开机以来的全部单元日志（覆盖服务整个当前
+            # 运行周期，包括数小时前打出的 EPC Initialized 行）
+            cmd.append("-b")
+        else:
+            cmd += ["--since", f"@{since_epoch:.3f}"]
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -94,7 +101,7 @@ class LinuxJournalLogSource(LogSource):
     def poll(self) -> list[LogLine]:
         with self._lock:
             if self._last_ts is None:
-                since = time.time() - self._boot_history_s
+                since = None  # 首次: 本次开机全量（见 _fetch 注释）
             else:
                 # overlap window: journal timestamps have ms resolution, and
                 # lines may arrive slightly out of order between polls
