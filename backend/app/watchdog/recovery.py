@@ -5,8 +5,9 @@ ProcessManager —— 系统中唯一允许的操作，不执行任意命令）�
 
 策略（按序判定，只动真正故障的部分）：
   1. CONFIG_ERROR       -> 不动作（重启无意义），返回失败交由 engine 进 FAULT
-  2. EPC 进程不在        -> restart EPC（连带重置 EPC/S1 日志状态），
-                            等待 EPC READY
+  2. EPC 进程不在 / EPC 挂在初始化（READY 超时）
+                        -> restart EPC（连带重置 EPC/S1 日志状态），
+                           等待 EPC READY
   3. S1_LOST（曾就绪后断开）-> 只 restart eNB（不是启动失败，不动 EPC）
   4. eNB 进程不在 / RF 未打开 / eNodeB 未 started / S1 未建立
                         -> restart eNB
@@ -107,9 +108,13 @@ class RecoveryManager:
 
         acted = False
 
-        # 2) EPC down -> restart EPC, wait EPC READY
-        if not report.epc_running:
-            logger.warning("recovery: restarting srsEPC")
+        # 2) EPC down or stuck before READY -> restart EPC, wait EPC READY
+        #    (health 只在 stage_timeout=="EPC_READY" 时报此问题 —— EPC 进程
+        #    挂在初始化中途也是死局，幂等 start 不会产生新日志，必须重启)
+        epc_stuck = report.stage_timeout == "EPC_READY" and report.epc_running
+        if not report.epc_running or epc_stuck:
+            logger.warning("recovery: restarting srsEPC (%s)",
+                           "epc_down" if not report.epc_running else "epc_not_ready")
             self._agg.reset_service("epc")
             self._process.restart(ServiceName.EPC)
             self._bus.publish_event(EventType.EPC_STARTED, source="Watchdog",
