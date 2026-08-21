@@ -84,6 +84,14 @@ class MonitorLoop:
         rt = self.rt
         providers: Providers = rt.providers
 
+        # manager-only 模式下没有 engine 循环 —— monitor 自己泵日志管线，
+        # 保证聚合器（S1/USRP 日志证据）随 journalctl 推进
+        if rt.pipeline is not None and rt.engine is None:
+            try:
+                rt.pipeline.pump()
+            except Exception:  # noqa: BLE001
+                logger.exception("monitor log pump failed")
+
         system = providers.system.get_metrics()
         enb_metrics = providers.srsran.get_enb_metrics()
         core = providers.core_traffic.get_traffic()
@@ -209,6 +217,13 @@ class Runtime:
                 self.pipeline, self.aggregator, state_store=self.state_store,
             )
             self.sm.add_listener(self._on_state_change)
+        elif config.watchdog.run_monitor:
+            # manager-only split 模式：不跑看门狗引擎，但 monitor 需要
+            # 日志聚合器 —— S1/USRP 状态以日志证据为准（eNB 持有 B210 时
+            # uhd_find_devices / SCTP 探测结果不可靠）。monitor tick 会泵
+            # 这条管线，与 watchdog 进程各自拉 journalctl 互不干扰（只读）。
+            self.aggregator = LogStateAggregator(bus=self.bus)
+            self.pipeline = LogPipeline(self.providers.logs, self.aggregator)
 
         self.control = ControlService(self.providers.process, self.engine, self.bus,
                                       state_store=self.state_store)
