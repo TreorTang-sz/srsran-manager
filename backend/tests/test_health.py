@@ -173,7 +173,7 @@ def test_enb_rf_not_opened_timeout_is_critical():
         "---  Software Radio Systems LTE eNodeB  ---",
         "Reading configuration file /etc/srsran/enb.conf...",
     ])  # stuck in CONFIG_LOADING
-    age(agg, enb_stage_since=91)
+    age(agg, enb_stage_since=181)  # > enb_rf_timeout 默认 180s
     report = build_checker(agg=agg).check()
     assert report.level == HealthLevel.CRITICAL
     assert report.stage_timeout == "ENB_RF"
