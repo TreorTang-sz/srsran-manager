@@ -4,6 +4,36 @@
 版本唯一权威定义在 `backend/app/__init__.py` 的 `__version__`，
 git tag 与 GitHub Release 与之保持一致（API `/api/status` 与前端顶栏均显示该版本）。
 
+## [2.0.3] - 2026-08-21
+
+### 修复（RK3588 + B210 + Ubuntu 22.04 实机部署发现）
+
+- **LinuxSystemProvider 磁盘统计崩溃**：`shutil.disk_usage()` 返回值没有
+  `.percent` 属性（那是 psutil 的），看门狗每秒崩溃重启；另有
+  `_last_diskstats` 属性名笔误。修复后看门狗与 `/api/status` 均正常。
+- **srsRAN 配置回退行误判为 CONFIG_ERROR**：`Couldn't open , trying
+  /root/.config/srsran/enb.conf` 是 srsRAN 正常的配置查找回退输出，
+  旧正则会捕获逗号并直接进 FAULT。正则改为 `[^\s,]+\s` 后不再误伤。
+- **看门狗重启后 EPC 误报"未就绪"→ 无限恢复失败 → FAULT**：旧实现首次
+  只拉 `boot_history_s=300s` 日志，而 EPC 可能已连续运行数小时，其
+  `Initialized` 日志在窗口外 → `epc_stage` 卡在 STARTING → 45s 超时 →
+  恢复动作是幂等 start（无新日志可验证）→ 3 次失败进 FAULT（实机复现）。
+  修复：首次拉取改为 `journalctl -b`（本次开机全量），服务当前运行周期
+  的日志证据完整重放；恢复策略对「EPC 挂在初始化（READY 超时）」也执行
+  restart（幂等 start 对卡死进程无效）。
+- **分进程部署下 Web 显示 USRP 离线**：manager 进程（SRSRAN_MANAGER_ONLY）
+  原先不装配日志聚合器，S1/USRP 状态回退到 provider 探测 —— 而 eNB 持有
+  B210 时 `uhd_find_devices` 结果不可靠。现在 manager 进程也装配日志管线
+  （monitor tick 泵送），USRP/S1 状态一律以 eNB 日志证据为准。
+- **新增 `RF_INIT_ERROR` 日志事件**（`uhd_init failed` / `Error initializing
+  radio`）：B210 USB 句柄未释放等可恢复的 RF 初始化失败按「进程死亡」正常
+  自动恢复，不再误入 CONFIG_ERROR/FAULT。
+
+### 变更
+
+- `watchdog.stages.enb_rf_timeout` 默认 90s → 180s（RK3588 上 B210 +
+  大 PRB 初始化实测较慢；板端配置以 `/etc/srsran-manager/config.yaml` 为准）
+
 ## [2.0.2] - 2026-08-21
 
 ### 修复
