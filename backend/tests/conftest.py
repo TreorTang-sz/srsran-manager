@@ -20,13 +20,22 @@ def make_config(tmp_path, **overrides) -> AppConfig:
     cfg.watchdog.check_interval = 0.05
     cfg.watchdog.monitor_interval = 0.05
     cfg.watchdog.auto_start = False  # tests drive the network explicitly
-    cfg.watchdog.start_timeout = 1.0
     cfg.watchdog.recovery_cooldown = 0.05
-    cfg.watchdog.verify_delay = 0.25  # > start_delay + s1_connect_delay margin
+    cfg.watchdog.verify_delay = 0.25
     cfg.watchdog.max_recovery_attempts = 3
+    # fast stage timeouts (log-evidence startup chain)
+    cfg.watchdog.stages.epc_ready_timeout = 0.5
+    cfg.watchdog.stages.enb_rf_timeout = 0.5
+    cfg.watchdog.stages.enb_running_timeout = 0.5
+    cfg.watchdog.stages.s1_ready_timeout = 0.5
+    cfg.watchdog.stages.s1_reconnect_grace = 0.3
     cfg.mock.start_delay = 0.05
     cfg.mock.stop_delay = 0.02
     cfg.mock.s1_connect_delay = 0.05
+    # mock log-script timing (real-log sequences at test speed)
+    cfg.mock.epc_ready_delay = 0.05
+    cfg.mock.enb_rf_delay = 0.05
+    cfg.mock.enb_started_delay = 0.05
     cfg.mock.ue_attach_probability = 0.0  # deterministic tests
     cfg.mock.ue_detach_probability = 0.0
     for key, value in overrides.items():

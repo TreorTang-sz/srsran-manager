@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app import __version__
 from app.config import AppConfig, load_config
 from app.runtime import Runtime, build_runtime
 
@@ -36,7 +37,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app = FastAPI(
         title="srsRAN Manager",
         description="Management / monitoring / watchdog system for an srsRAN 4G base station",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.runtime = runtime

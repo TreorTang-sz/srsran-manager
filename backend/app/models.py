@@ -12,6 +12,8 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from app import __version__
+
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -31,12 +33,84 @@ class ServiceState(str, Enum):
 
 
 class WatchdogState(str, Enum):
+    """Watchdog top-level states (log-event driven startup pipeline).
+
+    Startup path (derived from real srsRAN logs):
+      STOPPED -> STARTING -> EPC_READY -> ENB_RF_INITIALIZING ->
+      ENB_RUNNING -> S1_CONNECTING -> RUNNING
+    Side states:
+      WARNING     ready but a soft threshold is exceeded (CPU/temp/...)
+      DEGRADED    was S1_READY, then S1 lost (SCTP Association Shutdown)
+      RECOVERING  automatic recovery in progress
+      FAULT       manual action required (config error / attempts exhausted)
+    """
     STOPPED = "STOPPED"
     STARTING = "STARTING"
+    EPC_READY = "EPC_READY"
+    ENB_RF_INITIALIZING = "ENB_RF_INITIALIZING"
+    ENB_RUNNING = "ENB_RUNNING"
+    S1_CONNECTING = "S1_CONNECTING"
     RUNNING = "RUNNING"
     WARNING = "WARNING"
+    DEGRADED = "DEGRADED"
     RECOVERING = "RECOVERING"
     FAULT = "FAULT"
+
+
+# Startup-path states, in order (used to derive the watchdog state from
+# the component stages observed in the logs).
+STARTUP_PATH: list["WatchdogState"] = [
+    WatchdogState.STOPPED,
+    WatchdogState.STARTING,
+    WatchdogState.EPC_READY,
+    WatchdogState.ENB_RF_INITIALIZING,
+    WatchdogState.ENB_RUNNING,
+    WatchdogState.S1_CONNECTING,
+    WatchdogState.RUNNING,
+]
+
+
+class EnbStage(str, Enum):
+    """srsENB lifecycle stage, derived from real srsENB journal logs.
+
+    DOWN            process not running / no recent log evidence
+    STARTING        banner seen: "---  Software Radio Systems LTE eNodeB  ---"
+    CONFIG_LOADING  "Reading configuration file ..."
+    RF_READY        "RF device 'UHD' successfully opened" (UHD + USRP OK)
+    RUNNING         "==== eNodeB started ==="
+    """
+    DOWN = "DOWN"
+    STARTING = "STARTING"
+    CONFIG_LOADING = "CONFIG_LOADING"
+    RF_READY = "RF_READY"
+    RUNNING = "RUNNING"
+
+
+class EpcStage(str, Enum):
+    """srsEPC lifecycle stage, derived from real srsEPC journal logs.
+
+    READY requires ALL initialisation lines (HSS/MME/SPGW ... Initialized).
+    """
+    DOWN = "DOWN"
+    STARTING = "STARTING"
+    READY = "READY"
+
+
+class S1State(str, Enum):
+    """S1 link state machine (log-event driven, replaces a bare bool).
+
+    S1_DOWN           no S1AP activity yet (eNB not ready / just started)
+    S1_CONNECTING     EPC log: "Received S1 Setup Request."
+    S1_READY          EPC log: "Sending S1 Setup Response"
+    S1_LOST           was READY, then "SCTP Association Shutdown"
+    S1_CONFIG_ERROR   "S1 Setup Failure cause: misc - unknown-PLMN" (or
+                      similar) — restarting is pointless, config fix needed
+    """
+    S1_DOWN = "S1_DOWN"
+    S1_CONNECTING = "S1_CONNECTING"
+    S1_READY = "S1_READY"
+    S1_LOST = "S1_LOST"
+    S1_CONFIG_ERROR = "S1_CONFIG_ERROR"
 
 
 class HealthLevel(str, Enum):
@@ -72,12 +146,20 @@ class EventType:
     ENB_STOPPED = "ENB_STOPPED"
     S1_CONNECTED = "S1_CONNECTED"
     S1_DISCONNECTED = "S1_DISCONNECTED"
+    S1_LOST = "S1_LOST"
     UE_ATTACHED = "UE_ATTACHED"
     UE_DETACHED = "UE_DETACHED"
     USRP_CONNECTED = "USRP_CONNECTED"
     USRP_DISCONNECTED = "USRP_DISCONNECTED"
     ENB_CRASH = "ENB_CRASH"
     EPC_CRASH = "EPC_CRASH"
+    # log-event driven component stages (real srsRAN journal evidence)
+    ENB_RF_READY = "ENB_RF_READY"
+    EPC_READY = "EPC_READY"
+    ENB_STAGE_CHANGED = "ENB_STAGE_CHANGED"
+    RF_TX_ERROR = "RF_TX_ERROR"
+    RF_REALTIME_WARNING = "RF_REALTIME_WARNING"
+    CONFIG_ERROR = "CONFIG_ERROR"
     AUTO_RECOVERY_STARTED = "AUTO_RECOVERY_STARTED"
     AUTO_RECOVERY_SUCCESS = "AUTO_RECOVERY_SUCCESS"
     AUTO_RECOVERY_FAILED = "AUTO_RECOVERY_FAILED"
@@ -96,6 +178,10 @@ class ServiceStatus(BaseModel):
     state: ServiceState = ServiceState.UNKNOWN
     pid: Optional[int] = None
     detail: str = ""
+    # Log-derived lifecycle stage (EnbStage for enb, EpcStage for epc).
+    # Evidence-based, independent of the systemd process state.
+    stage: Optional[str] = None
+    stage_since: Optional[float] = None
 
 
 class SystemMetrics(BaseModel):
@@ -128,8 +214,14 @@ class UsrpStatus(BaseModel):
 
 class S1Status(BaseModel):
     ts: float = Field(default_factory=time.time)
+    # Log-event driven S1 state machine (primary source of truth).
+    state: S1State = S1State.S1_DOWN
+    # Convenience view for clients: True only when state == S1_READY.
     connected: bool = False
     detail: str = ""
+    # timestamps (epoch seconds) from the log aggregator
+    last_s1_ready_time: Optional[float] = None
+    last_sctp_shutdown_time: Optional[float] = None
 
 
 class UEInfo(BaseModel):
@@ -179,6 +271,9 @@ class WatchdogStatus(BaseModel):
     last_health_level: HealthLevel = HealthLevel.OK
     last_issues: List[str] = Field(default_factory=list)
     last_error: str = ""
+    # Why we are in FAULT ("" when not in FAULT): CONFIG_ERROR / e.g.
+    # "unknown-PLMN", or "recovery attempts exhausted".
+    fault_reason: str = ""
 
 
 class HealthIssue(BaseModel):
@@ -193,8 +288,23 @@ class HealthReport(BaseModel):
     issues: List[HealthIssue] = Field(default_factory=list)
     epc_running: bool = False
     enb_running: bool = False
-    s1_connected: bool = False
-    usrp_connected: bool = False
+    # log-derived component view (authoritative for health)
+    epc_stage: EpcStage = EpcStage.DOWN
+    enb_stage: EnbStage = EnbStage.DOWN
+    s1_state: S1State = S1State.S1_DOWN
+    # True when a configuration error was observed in the logs — restarting
+    # cannot help; the watchdog must enter FAULT without recovery attempts.
+    config_error: Optional[str] = None
+    # stage that timed out, if any (e.g. "ENB_RF"), for diagnostics
+    stage_timeout: Optional[str] = None
+
+    @property
+    def s1_connected(self) -> bool:
+        return self.s1_state == S1State.S1_READY
+
+    @property
+    def rf_ready(self) -> bool:
+        return self.enb_stage in (EnbStage.RF_READY, EnbStage.RUNNING)
 
     @property
     def is_critical(self) -> bool:
@@ -204,7 +314,8 @@ class HealthReport(BaseModel):
     def is_healthy_for_recovery(self) -> bool:
         """Recovery succeeds when no CRITICAL issue remains.
 
-        WARNING-level issues (high CPU / temperature) do not fail a recovery.
+        WARNING-level issues (high CPU / temperature / underflow) do not
+        fail a recovery.
         """
         return self.level != HealthLevel.CRITICAL
 
@@ -239,6 +350,7 @@ class Snapshot(BaseModel):
     """Combined live status pushed via WebSocket and served by /api/status."""
     ts: float = Field(default_factory=time.time)
     mode: str = "mock"
+    version: str = __version__  # deployment identification (matches git tag)
     watchdog: WatchdogStatus = Field(default_factory=WatchdogStatus)
     services: Dict[str, ServiceStatus] = Field(default_factory=dict)
     s1: S1Status = Field(default_factory=S1Status)

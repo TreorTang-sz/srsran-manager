@@ -47,6 +47,10 @@ class MockConfig:
     ue_attach_probability: float = 0.10
     ue_detach_probability: float = 0.03
     max_ues: int = 5
+    # --- 日志剧本时序（模拟真实 srsRAN 日志节奏） ---
+    epc_ready_delay: float = 0.5      # EPC banner -> 7 条 Initialized 日志
+    enb_rf_delay: float = 1.0         # eNB config -> "RF device 'UHD' successfully opened"
+    enb_started_delay: float = 0.5    # RF opened -> "==== eNodeB started ==="
 
 
 @dataclass
@@ -56,10 +60,30 @@ class WatchdogConfig:
     auto_start: bool = True             # 无人值守: 开机后自动拉起 LTE 网络
     check_interval: float = 1.0
     monitor_interval: float = 1.0
-    start_timeout: float = 30.0
     recovery_cooldown: float = 5.0
     max_recovery_attempts: int = 3    # 禁止无限重启
     verify_delay: float = 4.0
+    # 分阶段启动超时（见 StageTimeoutsConfig，覆盖旧的统一 start_timeout）
+    stages: "StageTimeoutsConfig" = field(default_factory=lambda: StageTimeoutsConfig())
+
+
+@dataclass
+class StageTimeoutsConfig:
+    """分阶段启动超时 —— 每个阶段等待对应的真实日志证据。
+
+    epc_ready_timeout      等 EPC 的 7 条 Initialized 日志
+    enb_rf_timeout         等 "RF device 'UHD' successfully opened"
+                           （UHD/B210 初始化，RK3588 上可能较慢）
+    enb_running_timeout    等 "==== eNodeB started ==="
+    s1_ready_timeout       等 "Sending S1 Setup Response"
+    s1_reconnect_grace     S1_LOST 后先等 eNB 自动重连（SCTP Shutdown
+                           不等于启动失败，不应立即重启）
+    """
+    epc_ready_timeout: float = 45.0
+    enb_rf_timeout: float = 90.0
+    enb_running_timeout: float = 60.0
+    s1_ready_timeout: float = 30.0
+    s1_reconnect_grace: float = 10.0
 
 
 @dataclass
@@ -124,12 +148,22 @@ class LinuxCoreTrafficConfig:
 
 
 @dataclass
+class LinuxLogsConfig:
+    """journalctl 日志源（看门狗核心判定依据）。"""
+    enb_unit: str = "srsran-enb"
+    epc_unit: str = "srsran-epc"
+    # 首次拉取的历史窗口：看门狗重启后从既有日志恢复组件状态
+    boot_history_s: float = 300.0
+
+
+@dataclass
 class LinuxConfig:
     services: LinuxServicesConfig = field(default_factory=LinuxServicesConfig)
     usrp: LinuxUsrpConfig = field(default_factory=LinuxUsrpConfig)
     metrics: LinuxMetricsConfig = field(default_factory=LinuxMetricsConfig)
     s1: LinuxS1Config = field(default_factory=LinuxS1Config)
     core_traffic: LinuxCoreTrafficConfig = field(default_factory=LinuxCoreTrafficConfig)
+    logs: LinuxLogsConfig = field(default_factory=LinuxLogsConfig)
 
 
 @dataclass

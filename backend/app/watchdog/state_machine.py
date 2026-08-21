@@ -1,92 +1,88 @@
-"""Watchdog state machine.
+"""Watchdog state machine — log-event driven startup pipeline.
 
-Explicit finite state machine — NOT scattered if/else branches.
+状态（来自真实 srsRAN 启动流程）：
 
-States:
-  STOPPED     services intentionally down (user stopped the network)
-  STARTING    services are being started, not yet healthy
-  RUNNING     everything healthy
-  WARNING     healthy but a soft threshold is exceeded (CPU/temp/mem/disk)
-  RECOVERING  automatic recovery in progress
-  FAULT       max recovery attempts exhausted — manual action required
+  STOPPED -> STARTING -> EPC_READY -> ENB_RF_INITIALIZING ->
+  ENB_RUNNING -> S1_CONNECTING -> RUNNING
+  侧态: WARNING / DEGRADED / RECOVERING / FAULT
 
-Events (inputs):
-  START         user asked the network to run
-  STOP          user asked the network to stop
-  HEALTHY       health check OK
-  WARNING       health check reports soft warnings only
-  CRITICAL      health check reports a hard failure
-  RECOVERY_OK   recovery attempt succeeded
-  RECOVERY_FAIL recovery attempt failed (engine decides retry or FAULT)
-  FAULT         engine exhausted recovery attempts
-  RESET         manual reset from FAULT (restart attempt)
+两种驱动方式：
+  * fire(event)   —— 控制类事件（START/STOP/CRITICAL/RECOVERY/FAULT/RESET），
+                     由显式转换表约束。
+  * sync_to(state) —— 启动路径的派生推进（engine 依据聚合器的组件阶段
+                     计算出应处的状态，幂等，允许沿启动路径前进/回退，
+                     例如 eNB 重启时 RUNNING -> EPC_READY）。
 
                     +---------+
-                    | STOPPED |<----------------------+
-                    +----+----+                        |
-                         | START                       | STOP
-                         v                             |
-                    +---------+  HEALTHY   +---------+  |
-             +----->|STARTING |----------->| RUNNING |--+
-             |      +----+----+            +----+----+
-             |           | CRITICAL            | CRITICAL
-             |           v                     v
-             |      +-----------+ WARNING +---------+
-             |      |RECOVERING |<--------| WARNING |
-             |      +-----+-----+         +---------+
-             |            | RECOVERY_OK -> RUNNING
-             |            | RECOVERY_FAIL (stay, retry)
-             |            | FAULT
-             |            v
-             |      +-------+   RESET   +---------+
-             +------| FAULT |---------->|STARTING |
-                    +-------+           +---------+
+                    | STOPPED |<--------------------------+
+                    +----+----+                           |
+                         | START                          | STOP
+                         v                                |
+                    +---------+  stage sync   +---------+  |
+                    |STARTING |-------------->|EPC_READY|  |
+                    +---------+               +----+----+  |
+                         ^                        |       |
+                         |              ENB_RF_INITIALIZING|
+                         |                        |       |
+                         |                   ENB_RUNNING  |
+                         |                        |       |
+                         |                  S1_CONNECTING |
+                         |                        |       |
+                         |                     RUNNING <--+ (WARNING side state)
+                         |                        |
+                         |     CRITICAL           | S1 lost -> DEGRADED
+                         +--------+  <-----------+        |
+                                  v                     | grace expired
+                             +-----------+  FAULT       | -> CRITICAL
+                             |RECOVERING |--------+     |
+                             +-----+-----+        |     |
+                               |   ^              v     |
+                    RECOVERY_OK|   |RECOVERY_FAIL +-----+
+                               v   (retry)       FAULT --RESET--> STARTING
+                             (re-derive)
 """
 from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from enum import Enum
 from typing import Callable, Deque, List, Optional, Tuple
 
-from collections import deque
-
 from app.models import WatchdogState
+
+# 派生同步允许的目标状态（运行/启动路径 + 侧态）
+_SYNCABLE = {
+    WatchdogState.STARTING,
+    WatchdogState.EPC_READY,
+    WatchdogState.ENB_RF_INITIALIZING,
+    WatchdogState.ENB_RUNNING,
+    WatchdogState.S1_CONNECTING,
+    WatchdogState.RUNNING,
+    WatchdogState.WARNING,
+    WatchdogState.DEGRADED,
+}
 
 
 class WatchdogEvent(str, Enum):
     START = "START"
     STOP = "STOP"
-    HEALTHY = "HEALTHY"
-    WARNING = "WARNING"
-    CRITICAL = "CRITICAL"
+    CRITICAL = "CRITICAL"           # hard failure -> recover
     RECOVERY_OK = "RECOVERY_OK"
     RECOVERY_FAIL = "RECOVERY_FAIL"
     FAULT = "FAULT"
     RESET = "RESET"
 
 
+# states from which CRITICAL leads to RECOVERING
+_OPERATING = _SYNCABLE | {WatchdogState.STARTING}
+
 # (state, event) -> next state
 TRANSITIONS: dict[Tuple[WatchdogState, WatchdogEvent], WatchdogState] = {
     (WatchdogState.STOPPED, WatchdogEvent.START): WatchdogState.STARTING,
     (WatchdogState.STOPPED, WatchdogEvent.STOP): WatchdogState.STOPPED,
 
-    (WatchdogState.STARTING, WatchdogEvent.HEALTHY): WatchdogState.RUNNING,
-    (WatchdogState.STARTING, WatchdogEvent.WARNING): WatchdogState.WARNING,
-    (WatchdogState.STARTING, WatchdogEvent.CRITICAL): WatchdogState.RECOVERING,
-    (WatchdogState.STARTING, WatchdogEvent.STOP): WatchdogState.STOPPED,
-
-    (WatchdogState.RUNNING, WatchdogEvent.HEALTHY): WatchdogState.RUNNING,
-    (WatchdogState.RUNNING, WatchdogEvent.WARNING): WatchdogState.WARNING,
-    (WatchdogState.RUNNING, WatchdogEvent.CRITICAL): WatchdogState.RECOVERING,
-    (WatchdogState.RUNNING, WatchdogEvent.STOP): WatchdogState.STOPPED,
-
-    (WatchdogState.WARNING, WatchdogEvent.HEALTHY): WatchdogState.RUNNING,
-    (WatchdogState.WARNING, WatchdogEvent.WARNING): WatchdogState.WARNING,
-    (WatchdogState.WARNING, WatchdogEvent.CRITICAL): WatchdogState.RECOVERING,
-    (WatchdogState.WARNING, WatchdogEvent.STOP): WatchdogState.STOPPED,
-
-    (WatchdogState.RECOVERING, WatchdogEvent.RECOVERY_OK): WatchdogState.RUNNING,
+    (WatchdogState.RECOVERING, WatchdogEvent.RECOVERY_OK): WatchdogState.STARTING,
     (WatchdogState.RECOVERING, WatchdogEvent.RECOVERY_FAIL): WatchdogState.RECOVERING,
     (WatchdogState.RECOVERING, WatchdogEvent.FAULT): WatchdogState.FAULT,
     (WatchdogState.RECOVERING, WatchdogEvent.STOP): WatchdogState.STOPPED,
@@ -95,8 +91,13 @@ TRANSITIONS: dict[Tuple[WatchdogState, WatchdogEvent], WatchdogState] = {
     (WatchdogState.FAULT, WatchdogEvent.STOP): WatchdogState.STOPPED,
 }
 
+# every operating state: CRITICAL -> RECOVERING, STOP -> STOPPED
+for _s in _OPERATING:
+    TRANSITIONS[(_s, WatchdogEvent.CRITICAL)] = WatchdogState.RECOVERING
+    TRANSITIONS[(_s, WatchdogEvent.STOP)] = WatchdogState.STOPPED
 
-TransitionListener = Callable[[WatchdogState, WatchdogState, WatchdogEvent], None]
+
+TransitionListener = Callable[[WatchdogState, WatchdogState, str], None]
 
 
 class WatchdogStateMachine:
@@ -106,7 +107,7 @@ class WatchdogStateMachine:
         self._lock = threading.RLock()
         self._state = initial
         self._state_since = time.time()
-        self._history: Deque[Tuple[float, WatchdogState, WatchdogState, WatchdogEvent]] = deque(maxlen=100)
+        self._history: Deque[Tuple[float, WatchdogState, WatchdogState, str]] = deque(maxlen=200)
         self._listeners: List[TransitionListener] = []
 
     # ------------------------------------------------------------------
@@ -128,20 +129,39 @@ class WatchdogStateMachine:
         with self._lock:
             return (self._state, event) in TRANSITIONS
 
+    # ------------------------------------------------------------------
     def fire(self, event: WatchdogEvent) -> Optional[WatchdogState]:
-        """Apply an event; returns the new state or None if not applicable."""
+        """Apply a control event; returns the new state or None."""
         with self._lock:
             key = (self._state, event)
             if key not in TRANSITIONS:
                 return None
-            old = self._state
             new = TRANSITIONS[key]
-            if new == old and event not in (WatchdogEvent.STOP, WatchdogEvent.WARNING):
-                return old  # no-op transition (e.g. RUNNING + HEALTHY)
-            self._state = new
-            self._state_since = time.time()
-            self._history.append((time.time(), old, new, event))
-            listeners = list(self._listeners)
+            return self._transition(new, event.value)
+
+    def sync_to(self, target: WatchdogState) -> Optional[WatchdogState]:
+        """Derive-driven state sync (startup path / WARNING / DEGRADED).
+
+        Only valid while the machine is in a derivable state (not in
+        STOPPED / RECOVERING / FAULT). Idempotent; may move backwards
+        along the startup path (e.g. eNB restart: RUNNING -> EPC_READY).
+        """
+        with self._lock:
+            if target not in _SYNCABLE:
+                return None
+            if self._state not in _SYNCABLE and self._state != WatchdogState.STARTING:
+                return None  # RECOVERING / FAULT / STOPPED: engine-controlled
+            if self._state == target:
+                return target
+            return self._transition(target, "SYNC")
+
+    # ------------------------------------------------------------------
+    def _transition(self, new: WatchdogState, event: str) -> WatchdogState:
+        old = self._state
+        self._state = new
+        self._state_since = time.time()
+        self._history.append((time.time(), old, new, event))
+        listeners = list(self._listeners)
         for listener in listeners:
             listener(old, new, event)
         return new
@@ -150,6 +170,6 @@ class WatchdogStateMachine:
         with self._lock:
             items = list(self._history)
         return [
-            {"ts": ts, "from": old.value, "to": new.value, "event": ev.value}
+            {"ts": ts, "from": old.value, "to": new.value, "event": ev}
             for ts, old, new, ev in items[-limit:]
         ]

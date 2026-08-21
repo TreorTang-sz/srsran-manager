@@ -2,6 +2,8 @@
 
 Ubuntu srsRAN 4G 基站服务器的管理、监控与看门狗系统。面向 **ARM64 / RK3588 / Ubuntu 20.04 或 22.04 / USRP B210** 无头（无显示器/键盘）运行环境，日常管理完全通过浏览器完成。
 
+**当前版本：v2.0.0**（变更历史见 [CHANGELOG.md](CHANGELOG.md)；版本号以 `backend/app/__init__.py` 为准，`/api/status` 与前端顶栏均会显示）
+
 ```
 ┌────────────────────────── 浏览器 (PC / 手机) ──────────────────────────┐
 │            http://SERVER_IP:8080                                     │
@@ -20,10 +22,15 @@ Ubuntu srsRAN 4G 基站服务器的管理、监控与看门狗系统。面向 **
 ## 核心特性
 
 - **无人值守自启动**：开机后 systemd 拉起看门狗，`auto_start` 自动建立 LTE 网络（EPC→ENB→S1）
-- **看门狗状态机**：`STOPPED → STARTING → RUNNING ⇄ WARNING → RECOVERING → FAULT`，显式 FSM 而非散落 if
-- **深度健康判断**：不靠 `pgrep` —— 区分进程存在 / 服务正常 / S1 连接 / UHD 正常 / B210 在位
-- **有限次恢复**：连续失败 3 次进入 FAULT 停止自动重启，等待人工复位（禁止无限重启）
-- **故障注入**（Mock 模式）：eNB/EPC 崩溃、S1 断开、B210 拔出、高 CPU、高温、恢复失败 —— Windows 上即可完整验证状态机
+- **日志事件驱动状态机（v2）**：以真实 srsRAN 日志为判定依据——
+  `STOPPED → STARTING → EPC_READY → ENB_RF_INITIALIZING → ENB_RUNNING → S1_CONNECTING → RUNNING`；
+  不再使用「进程存在 = 正常 / S1 断开 = 故障 / 30 秒未成功 = 失败」的粗粒度判定
+- **S1 五态机**：`S1_DOWN / S1_CONNECTING / S1_READY / S1_LOST / S1_CONFIG_ERROR`；
+  S1_READY 后 SCTP Shutdown 视为 S1_LOST（等待重连），不是启动失败；
+  `S1 Setup Failure: unknown-PLMN` 视为配置错误直接 FAULT（重启无效）
+- **分阶段超时**：EPC 就绪 / eNB RF 打开 / eNodeB started / S1 就绪各自独立超时，适配 B210 慢初始化
+- **有限次恢复**：连续失败 3 次进入 FAULT 停止自动重启，等待人工复位（禁止无限重启）；配置错误不消耗次数
+- **故障注入**（Mock 模式）：eNB/EPC 崩溃、S1 断开、B210 拔出、PLMN 错误、高 CPU、高温、恢复失败 —— Windows 上即可完整验证状态机
 - **监控指标**：CPU（总/每核）、内存、Swap、磁盘容量与 IO、网络 RX/TX、CPU 温度、运行时间；UE 数量/RNTI/CQI/MCS/DL/UL；空口与核心网吞吐量分离
 - **事件与日志**：SQLite 持久化（events / logs / kv_state），Web 可查可过滤
 - **安全**：控制接口需 API Token；Web 层不执行任意 shell，仅调用固定 systemctl 动作；服务单元带 systemd 加固
@@ -40,12 +47,12 @@ srsran-manager/
 │   │   ├── config.py             配置 (yaml + 环境变量)
 │   │   ├── models.py             数据模型 (Pydantic)
 │   │   ├── api/                  REST + WebSocket 路由
-│   │   ├── watchdog/             状态机 / 健康检查 / 恢复策略
-│   │   ├── providers/            Provider 抽象 + Linux 实现
-│   │   ├── mock/                 Windows Mock 实现 + 故障注入
+│   │   ├── watchdog/             日志解析 / 聚合器 / 状态机 / 健康检查 / 恢复策略
+│   │   ├── providers/            Provider 抽象 + Linux 实现 (含 journalctl 日志源)
+│   │   ├── mock/                 Windows Mock 实现 + 日志剧本 + 故障注入
 │   │   ├── core/                 事件总线 / 控制服务 / 吞吐量历史
 │   │   └── database/             SQLite (events/logs/kv_state)
-│   └── tests/                    51 个自动化测试
+│   └── tests/                    66 个自动化测试
 ├── frontend/                     Vue 3 + TypeScript + ECharts
 ├── deploy/systemd/               4 个 systemd 服务单元
 ├── deploy/install.sh|uninstall.sh

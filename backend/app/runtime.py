@@ -25,8 +25,10 @@ from app.database.models import (
     StateStore,
 )
 from app.models import (
+    EnbStage,
     EventType,
     HealthLevel,
+    S1State,
     ServiceName,
     ServiceState,
     Severity,
@@ -36,10 +38,12 @@ from app.models import (
 )
 from app.mock.faults import FaultController
 from app.providers import Providers, build_providers
+from app.watchdog.aggregator import LogStateAggregator
 from app.watchdog.engine import WatchdogEngine
 from app.watchdog.health import HealthChecker
+from app.watchdog.pipeline import LogPipeline
 from app.watchdog.recovery import RecoveryManager
-from app.watchdog.state_machine import WatchdogEvent, WatchdogStateMachine
+from app.watchdog.state_machine import WatchdogStateMachine
 
 logger = logging.getLogger("srsran.runtime")
 
@@ -87,6 +91,28 @@ class MonitorLoop:
         usrp = providers.usrp.get_status()
         epc_status = providers.process.status(ServiceName.EPC)
         enb_status = providers.process.status(ServiceName.ENB)
+
+        # 日志证据优先：watchdog 进程内聚合器是 S1/USRP 状态的第一现场
+        # （进程在跑不等于 RF 可用；SCTP 探测只是辅助视图）。
+        if rt.aggregator is not None:
+            snap = rt.aggregator.snapshot()
+            s1 = s1.model_copy(update={
+                "state": snap.s1_state,
+                "connected": snap.s1_state == S1State.S1_READY,
+                "detail": f"log-derived S1 state ({snap.s1_state.value})",
+                "last_s1_ready_time": snap.last_s1_ready_time,
+                "last_sctp_shutdown_time": snap.last_sctp_shutdown_time,
+            })
+            if snap.enb_stage in (EnbStage.RF_READY, EnbStage.RUNNING):
+                usrp = usrp.model_copy(update={
+                    "connected": True,
+                    "detail": "RF device 'UHD' opened (eNB log evidence)",
+                })
+            elif snap.usrp_log_error:
+                usrp = usrp.model_copy(update={
+                    "connected": False,
+                    "detail": snap.usrp_log_error,
+                })
 
         self._detect_changes(epc_status.state, enb_status.state, s1.connected,
                              usrp.connected, [u.rnti for u in enb_metrics.ues])
@@ -160,17 +186,28 @@ class Runtime:
 
         self.history = ThroughputHistory()
 
+        # log pipeline (parser + aggregator): the watchdog's evidence core
+        self.aggregator: Optional[LogStateAggregator] = None
+        self.pipeline: Optional[LogPipeline] = None
+
         # watchdog (optional: absent in manager-only split mode)
         self.engine: Optional[WatchdogEngine] = None
         self.sm = WatchdogStateMachine()
         if config.watchdog.run_watchdog:
+            self.aggregator = LogStateAggregator(bus=self.bus)
+            self.pipeline = LogPipeline(self.providers.logs, self.aggregator)
             health = HealthChecker(
-                self.providers.process, self.providers.usrp,
-                self.providers.s1, self.providers.system, config,
+                self.providers.process, self.providers.system,
+                self.aggregator, config,
             )
-            recovery = RecoveryManager(self.providers.process, health, self.bus, config)
-            self.engine = WatchdogEngine(self.sm, health, recovery, self.bus,
-                                         config, state_store=self.state_store)
+            recovery = RecoveryManager(
+                self.providers.process, health, self.bus, config,
+                self.aggregator, self.pipeline,
+            )
+            self.engine = WatchdogEngine(
+                self.sm, health, recovery, self.bus, config,
+                self.pipeline, self.aggregator, state_store=self.state_store,
+            )
             self.sm.add_listener(self._on_state_change)
 
         self.control = ControlService(self.providers.process, self.engine, self.bus,
@@ -231,13 +268,14 @@ class Runtime:
         return self.monitor.tick()
 
     def _on_state_change(self, old: WatchdogState, new: WatchdogState,
-                         event: WatchdogEvent) -> None:
+                         event: str) -> None:
+        # event is the transition cause: "START" | "SYNC" | ... (str)
         self.bus.publish_event(
             EventType.WATCHDOG_STATE_CHANGED, source="Watchdog",
             severity=Severity.WARNING if new in (WatchdogState.RECOVERING, WatchdogState.FAULT)
             else Severity.INFO,
-            message=f"watchdog state: {old.value} -> {new.value} (event={event.value})",
-            data={"from": old.value, "to": new.value, "event": event.value},
+            message=f"watchdog state: {old.value} -> {new.value} (event={event})",
+            data={"from": old.value, "to": new.value, "event": event},
         )
 
     # ------------------------------------------------------------------

@@ -5,7 +5,7 @@ import random
 import time
 
 from app.mock.world import MockWorld
-from app.models import CoreTraffic, EnbMetrics, S1Status
+from app.models import CoreTraffic, EnbMetrics, S1State, S1Status
 
 
 class MockS1Provider:
@@ -15,12 +15,19 @@ class MockS1Provider:
     def get_status(self) -> S1Status:
         connected = self.world.s1_connected()
         if connected:
+            state = S1State.S1_READY
             detail = "SCTP association to EPC :36412 established"
+        elif self.world.plmn_error:
+            state = S1State.S1_CONFIG_ERROR
+            detail = "S1 Setup Failure cause: misc - unknown-PLMN"
         elif self.world.s1_fault:
-            detail = "S1 link down (injected fault)"
+            state = S1State.S1_LOST
+            detail = "SCTP Association Shutdown (injected fault)"
         else:
+            state = S1State.S1_DOWN
             detail = "S1 not established (eNB or EPC not running)"
-        return S1Status(ts=time.time(), connected=connected, detail=detail)
+        return S1Status(ts=time.time(), state=state, connected=connected,
+                        detail=detail)
 
 
 class MockSrsranMetricsProvider:

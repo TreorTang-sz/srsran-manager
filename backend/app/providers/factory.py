@@ -10,6 +10,7 @@ from typing import Optional
 from app.config import AppConfig
 from app.providers.base import (
     CoreTrafficProvider,
+    LogSource,
     ProcessManager,
     S1Provider,
     SrsranMetricsProvider,
@@ -26,6 +27,8 @@ class Providers:
     s1: S1Provider
     srsran: SrsranMetricsProvider
     core_traffic: CoreTrafficProvider
+    # srsEPC / srsENB log lines — the watchdog's primary evidence source.
+    logs: LogSource
     # Present only in mock mode; None in production (Linux) mode.
     mock_world: Optional[object] = None
 
@@ -35,6 +38,7 @@ def build_providers(config: AppConfig) -> Providers:
     if mode == "mock":
         from app.mock.world import MockWorld
         from app.mock.process import MockProcessManager
+        from app.mock.logs import MockLogSource
         from app.mock.srsran import MockCoreTrafficProvider, MockS1Provider, MockSrsranMetricsProvider
         from app.mock.system import MockSystemMetricsProvider
         from app.mock.usrp import MockUsrpProvider
@@ -47,9 +51,11 @@ def build_providers(config: AppConfig) -> Providers:
             s1=MockS1Provider(world),
             srsran=MockSrsranMetricsProvider(world),
             core_traffic=MockCoreTrafficProvider(world),
+            logs=MockLogSource(world),
             mock_world=world,
         )
 
+    from app.providers.linux_logs import LinuxJournalLogSource
     from app.providers.linux_network import LinuxCoreTrafficProvider, LinuxS1Provider
     from app.providers.linux_process import LinuxSystemdProcessManager
     from app.providers.linux_srsran import LinuxSrsranMetricsProvider
@@ -63,5 +69,6 @@ def build_providers(config: AppConfig) -> Providers:
         s1=LinuxS1Provider(config),
         srsran=LinuxSrsranMetricsProvider(config),
         core_traffic=LinuxCoreTrafficProvider(config),
+        logs=LinuxJournalLogSource(config),
         mock_world=None,
     )

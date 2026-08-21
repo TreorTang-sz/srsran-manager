@@ -22,11 +22,28 @@ function serviceLevel(state?: string): Card['level'] {
   }
 }
 
+// 日志事件驱动的 S1 状态机: DOWN -> CONNECTING -> READY；LOST = 断开后等待重连
+function s1View(s1: { state?: string; connected?: boolean } | undefined) {
+  switch (s1?.state) {
+    case 'S1_READY': return { level: 'ok' as const, main: 'S1 READY' }
+    case 'S1_CONNECTING': return { level: 'warn' as const, main: 'S1 CONNECTING' }
+    case 'S1_LOST': return { level: 'err' as const, main: 'S1 LOST' }
+    case 'S1_CONFIG_ERROR': return { level: 'err' as const, main: 'S1 CONFIG ERROR' }
+    case 'S1_DOWN': return { level: 'dim' as const, main: 'S1 DOWN' }
+    default:
+      // 兼容无 state 字段的旧后端
+      return s1?.connected
+        ? { level: 'ok' as const, main: 'CONNECTED' }
+        : { level: 'dim' as const, main: 'DISCONNECTED' }
+  }
+}
+
 const cards = computed<Card[]>(() => {
   const s = snap.value
   if (!s) return []
   const epc = s.services?.epc
   const enb = s.services?.enb
+  const s1 = s1View(s.s1)
   return [
     {
       key: 'epc',
@@ -45,8 +62,8 @@ const cards = computed<Card[]>(() => {
     {
       key: 's1',
       title: 'S1 连接',
-      level: s.s1.connected ? 'ok' : 'err',
-      main: s.s1.connected ? 'CONNECTED' : 'DISCONNECTED',
+      level: s1.level,
+      main: s1.main,
       sub: s.s1.detail || 'eNB ↔ EPC',
     },
     {

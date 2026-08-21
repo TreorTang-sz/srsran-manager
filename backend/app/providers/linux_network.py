@@ -17,7 +17,7 @@ import subprocess
 import time
 
 from app.config import AppConfig
-from app.models import CoreTraffic, S1Status
+from app.models import CoreTraffic, S1State, S1Status
 
 
 class LinuxS1Provider:
@@ -57,12 +57,19 @@ class LinuxS1Provider:
         return c_pos > d_pos
 
     def get_status(self) -> S1Status:
+        # Auxiliary view (kernel SCTP / journal). The authoritative S1 state
+        # machine is log-derived in the watchdog's aggregator; when the
+        # watchdog runs in-process, MonitorLoop overrides this view.
         if self._cfg.method == "log":
             ok = self._log_connected()
-            return S1Status(connected=ok, detail="journal S1AP state")
+            return S1Status(state=S1State.S1_READY if ok else S1State.S1_DOWN,
+                            connected=ok, detail="journal S1AP state")
         ok = self._sctp_established()
-        return S1Status(connected=ok, detail=f"SCTP :{self._cfg.sctp_port} established" if ok
-                        else f"no SCTP association to :{self._cfg.sctp_port}")
+        return S1Status(
+            state=S1State.S1_READY if ok else S1State.S1_DOWN,
+            connected=ok,
+            detail=f"SCTP :{self._cfg.sctp_port} established" if ok
+            else f"no SCTP association to :{self._cfg.sctp_port}")
 
 
 class LinuxCoreTrafficProvider:

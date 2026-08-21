@@ -131,8 +131,10 @@ def test_full_cycle_over_api(client):
     client.post("/api/network/stop", headers=auth_headers())
     assert wait_for(lambda: client.get("/api/status").json()["watchdog"]["state"] == "STOPPED",
                     timeout=5)
-    status = client.get("/api/status").json()
-    assert status["services"]["epc"]["state"] == "STOPPED"
+    # systemd stop 是异步的 (STOPPING -> STOPPED); 快照也按 monitor 周期采样
+    assert wait_for(
+        lambda: client.get("/api/status").json()["services"]["epc"]["state"] == "STOPPED",
+        timeout=5)
 
 
 def test_restart_single_service(client):

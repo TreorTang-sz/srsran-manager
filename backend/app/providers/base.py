@@ -90,5 +90,37 @@ class CoreTrafficProvider(ABC):
         ...
 
 
+class LogLine:
+    """One raw srsRAN log line with its origin and timestamp."""
+
+    __slots__ = ("service", "ts", "message")
+
+    def __init__(self, service: str, ts: float, message: str) -> None:
+        self.service = service      # "enb" | "epc"
+        self.ts = ts                # epoch seconds
+        self.message = message
+
+    def __repr__(self) -> str:  # pragma: no cover — debug helper
+        return f"LogLine({self.service}, {self.ts:.3f}, {self.message[:60]!r})"
+
+
+class LogSource(ABC):
+    """Incremental source of srsEPC / srsENB log lines.
+
+    Implementations MUST:
+      * return each line exactly once (deduplicated across polls)
+      * stamp lines with the source timestamp (journal time), not poll time
+      * be safe to call from the watchdog thread
+
+    Linux: journalctl (json output). Mock: scripted world timeline.
+    The same LogEventParser consumes lines from either implementation
+    (identical-interface principle).
+    """
+
+    @abstractmethod
+    def poll(self) -> list[LogLine]:
+        ...
+
+
 def service_state_is_running(state: ServiceState) -> bool:
     return state == ServiceState.RUNNING

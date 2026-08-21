@@ -10,12 +10,19 @@ const snap = computed(() => store().snapshot)
 const connected = computed(() => store().connected)
 const wd = computed(() => snap.value?.watchdog)
 
+// 启动链（日志事件驱动）: EPC_READY -> ENB_RF_INITIALIZING -> ENB_RUNNING
+// -> S1_CONNECTING -> RUNNING；DEGRADED = S1_LOST 等待重连
 const wdColor = computed(() => {
   switch (wd.value?.state) {
     case 'RUNNING': return 'var(--green)'
-    case 'WARNING': return 'var(--yellow)'
+    case 'WARNING':
+    case 'DEGRADED': return 'var(--yellow)'
     case 'RECOVERING':
-    case 'STARTING': return 'var(--blue)'
+    case 'STARTING':
+    case 'EPC_READY':
+    case 'ENB_RF_INITIALIZING':
+    case 'ENB_RUNNING':
+    case 'S1_CONNECTING': return 'var(--blue)'
     case 'FAULT': return 'var(--red)'
     default: return 'var(--muted)'
   }
@@ -53,8 +60,16 @@ function saveToken() {
         <span v-if="wd && wd.consecutive_failures > 0" class="badge" style="color: var(--yellow); border-color: var(--yellow)">
           恢复失败 {{ wd.consecutive_failures }}/{{ wd.max_recovery_attempts }}
         </span>
+        <span v-if="wd && wd.state === 'FAULT' && wd.fault_reason" class="badge"
+              style="color: var(--red); border-color: var(--red)"
+              :title="wd.fault_reason">
+          {{ wd.fault_reason.length > 40 ? wd.fault_reason.slice(0, 40) + '…' : wd.fault_reason }}
+        </span>
         <span v-if="snap.mode === 'mock'" class="badge" style="color: var(--purple); border-color: var(--purple)">
           MOCK
+        </span>
+        <span v-if="snap.version" class="badge" style="color: var(--muted); border-color: var(--muted)">
+          v{{ snap.version }}
         </span>
         <span class="badge" :style="connected
           ? 'color: var(--green); border-color: var(--green)'

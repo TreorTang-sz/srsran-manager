@@ -37,8 +37,13 @@ export interface UsrpStatus {
 
 export interface S1Status {
   ts: number
+  // Log-event driven S1 state machine:
+  // S1_DOWN | S1_CONNECTING | S1_READY | S1_LOST | S1_CONFIG_ERROR
+  state: string
   connected: boolean
   detail: string
+  last_s1_ready_time: number | null
+  last_sctp_shutdown_time: number | null
 }
 
 export interface UEInfo {
@@ -78,6 +83,8 @@ export interface WatchdogStatus {
   last_health_level: string
   last_issues: string[]
   last_error: string
+  // Why we are in FAULT ("" when not): CONFIG_ERROR / recovery exhausted
+  fault_reason: string
 }
 
 export interface EventRecord {
@@ -101,6 +108,8 @@ export interface LogRecord {
 export interface Snapshot {
   ts: number
   mode: string
+  // backend version (backend/app/__init__.py __version__, matches git tag)
+  version?: string
   watchdog: WatchdogStatus
   services: { epc: ServiceStatus; enb: ServiceStatus }
   s1: S1Status

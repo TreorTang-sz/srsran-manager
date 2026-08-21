@@ -39,7 +39,8 @@ def test_auto_start_on_boot(tmp_path):
         rt.start()  # no explicit start_network() call
         assert wait_for(lambda: rt.sm.state == WatchdogState.RUNNING, timeout=6), \
             f"expected RUNNING via auto-start, got {rt.sm.state}"
-        assert rt.snapshot().s1.connected
+        # snapshot 由 monitor 周期采样, 滞后于状态机 — 等待快照追上
+        assert wait_for(lambda: rt.snapshot().s1.connected, timeout=3)
     finally:
         rt.stop()
 

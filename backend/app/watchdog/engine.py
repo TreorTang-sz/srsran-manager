@@ -1,10 +1,16 @@
-"""Watchdog engine — the loop that drives the state machine.
+"""Watchdog engine — the loop that drives the log-event-driven state machine.
 
 Runs in its own thread and has ZERO dependency on the web layer
 (FastAPI is never imported here). In production it can run as a
-standalone systemd service (srsran-watchdog.service) using
-``python -m app.watchdog_runner``; in dev/mock mode it runs inside the
-manager process.
+standalone systemd service (srsran-watchdog.service); in dev/mock mode
+it runs inside the manager process.
+
+每个 tick：
+  1. pump 日志（journalctl / mock 剧本 -> 解析 -> 聚合器）
+  2. STOPPED + desired -> 发起启动（EPC 先、eNB 后）
+  3. CONFIG_ERROR -> 直接 FAULT（重启无意义，禁止自动恢复）
+  4. CRITICAL（进程死 / 阶段超时 / S1_LOST 超时）-> RECOVERING
+  5. 否则按聚合器的组件阶段派生状态（sync_to），S1_LOST -> DEGRADED
 
 Anti-infinite-restart: max_recovery_attempts (default 3) consecutive
 failures lead to FAULT; only a manual reset (web control / operator)
@@ -20,14 +26,19 @@ from typing import Optional
 from app.config import AppConfig
 from app.core.bus import EventBus
 from app.models import (
+    EnbStage,
+    EpcStage,
     EventType,
     HealthLevel,
     HealthReport,
     Severity,
+    S1State,
     WatchdogState,
     WatchdogStatus,
 )
+from app.watchdog.aggregator import LogStateAggregator
 from app.watchdog.health import HealthChecker
+from app.watchdog.pipeline import LogPipeline
 from app.watchdog.recovery import RecoveryManager
 from app.watchdog.state_machine import WatchdogEvent, WatchdogStateMachine
 
@@ -42,12 +53,16 @@ class WatchdogEngine:
         recovery: RecoveryManager,
         bus: EventBus,
         config: AppConfig,
+        pipeline: LogPipeline,
+        aggregator: LogStateAggregator,
         state_store=None,  # Optional[app.database.models.StateStore]
     ) -> None:
         self.sm = sm
         self.health = health
         self.recovery = recovery
         self.bus = bus
+        self.pipeline = pipeline
+        self.agg = aggregator
         self.cfg = config.watchdog
         self._state_store = state_store
 
@@ -63,6 +78,7 @@ class WatchdogEngine:
         self._total_recoveries = 0
         self._last_report: Optional[HealthReport] = None
         self._last_error = ""
+        self._fault_reason = ""
         self._announced_failures: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -107,13 +123,21 @@ class WatchdogEngine:
         return self._consecutive_failures
 
     def manual_reset_fault(self) -> None:
-        """Operator resets a FAULT: clears failure counters and retries."""
+        """Operator resets a FAULT: clears failure counters and retries.
+
+        强制重启两个服务：FAULT 场景下服务可能还在运行（如 PLMN 配置
+        错误），幂等 start 不会产生新的启动 banner —— 必须重启才能让
+        聚合器从新日志完整重建状态。
+        """
         with self.action_lock:
             self._consecutive_failures = 0
             self._last_error = ""
+            self._fault_reason = ""
+            self.agg.reset_all()
+            self.agg.clear_config_error()
             self.desired_running = True
             self.sm.fire(WatchdogEvent.RESET)
-            self.recovery.start_network()
+            self.recovery.start_network(force_restart=True)
         self.bus.publish_event(
             EventType.MANUAL_ACTION, source="Watchdog",
             message="manual fault reset — restarting network")
@@ -130,6 +154,7 @@ class WatchdogEngine:
             last_health_level=report.level if report else HealthLevel.OK,
             last_issues=[f"{i.component}: {i.message}" for i in report.issues] if report else [],
             last_error=self._last_error,
+            fault_reason=self._fault_reason,
         )
 
     # ------------------------------------------------------------------
@@ -137,70 +162,78 @@ class WatchdogEngine:
     # ------------------------------------------------------------------
     def _tick(self) -> None:
         self._sync_from_store()
+        self.pipeline.pump()
         self._persist_status()
         state = self.sm.state
 
         if not self.desired_running:
             if state != WatchdogState.STOPPED:
                 self.sm.fire(WatchdogEvent.STOP)
+                # 网络被主动停机：丢弃日志推导的旧状态（banner 回滚
+                # 依赖新日志，停机期间不会有新证据）
+                self.agg.reset_all()
             return
 
         if state == WatchdogState.STOPPED:
             # desired RUNNING but services are stopped -> start them
             with self.action_lock:
+                self._fault_reason = ""
                 self.sm.fire(WatchdogEvent.START)
                 self.recovery.start_network()
             return
 
-        if state == WatchdogState.STARTING:
-            self._handle_starting()
-            return
-
-        if state in (WatchdogState.RUNNING, WatchdogState.WARNING):
-            self._handle_running(state)
-            return
+        if state == WatchdogState.FAULT:
+            return  # wait for manual reset
 
         if state == WatchdogState.RECOVERING:
             self._handle_recovering()
             return
 
-        # FAULT: wait for manual reset
-        return
+        # operating states (STARTING / EPC_READY / ... / RUNNING / WARNING / DEGRADED)
+        self._handle_operating()
 
-    def _handle_starting(self) -> None:
+    # ------------------------------------------------------------------
+    def _handle_operating(self) -> None:
         report = self.health.check()
         self._last_report = report
-        if report.level == HealthLevel.OK:
-            self._announced_failures.clear()
-            self.sm.fire(WatchdogEvent.HEALTHY)
-            return
-        if report.level == HealthLevel.WARNING:
-            self._announced_failures.clear()
-            self.sm.fire(WatchdogEvent.WARNING)
-            return
-        self._announce_failures(report)
-        # CRITICAL: still starting or genuinely failing
-        elapsed = time.time() - self.sm.state_since
-        if elapsed < self.cfg.start_timeout:
-            return  # keep waiting for services to come up
-        # start timed out -> counts as failed attempt #1
-        logger.warning("start timed out after %.1fs", elapsed)
-        self._register_failure(reason="start timeout")
 
-    def _handle_running(self, state: WatchdogState) -> None:
-        report = self.health.check()
-        self._last_report = report
-        if report.level == HealthLevel.OK:
-            self._announced_failures.clear()
-            if state == WatchdogState.WARNING:
-                self.sm.fire(WatchdogEvent.HEALTHY)
-        elif report.level == HealthLevel.WARNING:
-            self._announced_failures.clear()
-            self.sm.fire(WatchdogEvent.WARNING)
-        else:
+        # 配置错误：重启无意义 —— 直接 FAULT，禁止自动恢复
+        if report.config_error:
+            self._announce_failures(report)
+            self._enter_fault(reason=f"CONFIG_ERROR: {report.config_error}")
+            return
+
+        if report.level == HealthLevel.CRITICAL:
             self._announce_failures(report)
             self.sm.fire(WatchdogEvent.CRITICAL)
+            return
 
+        self._announced_failures.clear()
+        target = self._derive_target(report)
+        if target is not None:
+            self.sm.sync_to(target)
+
+    def _derive_target(self, report: HealthReport) -> Optional[WatchdogState]:
+        """从组件阶段派生看门狗状态（详见 state_machine 模块文档）。"""
+        if report.epc_stage != EpcStage.READY:
+            return WatchdogState.STARTING
+        if report.enb_stage in (EnbStage.DOWN, EnbStage.STARTING, EnbStage.CONFIG_LOADING):
+            return WatchdogState.EPC_READY
+        if report.enb_stage == EnbStage.RF_READY:
+            return WatchdogState.ENB_RF_INITIALIZING
+        # enb_stage == RUNNING
+        s1 = report.s1_state
+        if s1 == S1State.S1_READY:
+            if report.level == HealthLevel.WARNING:
+                return WatchdogState.WARNING
+            return WatchdogState.RUNNING
+        if s1 == S1State.S1_LOST:
+            return WatchdogState.DEGRADED  # grace 内等待 eNB 自行重连
+        if s1 == S1State.S1_CONNECTING:
+            return WatchdogState.S1_CONNECTING
+        return WatchdogState.ENB_RUNNING  # S1_DOWN: 等 S1 协商日志
+
+    # ------------------------------------------------------------------
     def _handle_recovering(self) -> None:
         if self._recovery_in_progress:
             return
@@ -236,27 +269,28 @@ class WatchdogEngine:
             self._consecutive_failures = 0
             self.bus.publish_event(EventType.AUTO_RECOVERY_SUCCESS, source="Watchdog",
                                    message="recovery successful")
-            self.sm.fire(WatchdogEvent.RECOVERY_OK)
+            self.sm.fire(WatchdogEvent.RECOVERY_OK)  # -> STARTING, 下一 tick 重新派生
         else:
-            self._register_failure(reason="recovery unsuccessful")
+            reason = "configuration error" if (report and report.config_error) \
+                else "recovery unsuccessful"
+            self._register_failure(reason=reason,
+                                   config_error=(report.config_error if report else None))
 
     # ------------------------------------------------------------------
     def _announce_failures(self, report: HealthReport) -> None:
-        """Emit component-failure events once per unhealthy episode.
-
-        Deterministic announcement (independent of how fast the
-        recovery is): ENB_CRASH / EPC_CRASH / S1_DISCONNECTED /
-        USRP_DISCONNECTED are emitted by the engine the moment the
-        failing condition is observed.
-        """
+        """Emit component-failure events once per unhealthy episode."""
         failing: set[str] = set()
         if not report.epc_running:
             failing.add("EPC")
         if not report.enb_running:
             failing.add("ENB")
-        if report.epc_running and report.enb_running and not report.s1_connected:
-            failing.add("S1")
-        if not report.usrp_connected:
+        snap = self.agg.snapshot()
+        if report.epc_running and report.enb_running:
+            if snap.s1_state in (S1State.S1_LOST,):
+                failing.add("S1_LOST")
+            elif snap.s1_state == S1State.S1_CONFIG_ERROR:
+                failing.add("S1_CONFIG")
+        if report.enb_running and snap.usrp_log_error:
             failing.add("USRP")
 
         for comp in sorted(failing - self._announced_failures):
@@ -268,20 +302,45 @@ class WatchdogEngine:
                 self.bus.publish_event(EventType.ENB_CRASH, source="ENB",
                                        severity=Severity.ERROR,
                                        message="srsENB not running")
-            elif comp == "S1":
+            elif comp == "S1_LOST":
                 self.bus.publish_event(EventType.S1_DISCONNECTED, source="S1",
                                        severity=Severity.ERROR,
-                                       message="S1 link lost (eNB and EPC processes running)")
+                                       message="S1 link lost after SCTP shutdown")
+            elif comp == "S1_CONFIG":
+                self.bus.publish_event(EventType.S1_DISCONNECTED, source="S1",
+                                       severity=Severity.ERROR,
+                                       message="S1 setup failure (config mismatch)")
             elif comp == "USRP":
                 self.bus.publish_event(EventType.USRP_DISCONNECTED, source="USRP",
                                        severity=Severity.ERROR,
-                                       message="USRP B210 disconnected")
+                                       message=f"USRP B210 problem: {snap.usrp_log_error}")
         self._announced_failures = failing
 
-    def _register_failure(self, reason: str) -> None:
-        self._consecutive_failures += 1
+    def _enter_fault(self, reason: str) -> None:
+        if self.sm.state == WatchdogState.FAULT:
+            return
+        self._fault_reason = reason
+        self.bus.publish_event(
+            EventType.FAULT_ENTERED, source="Watchdog",
+            severity=Severity.CRITICAL,
+            message=f"FAULT: {reason} — automatic recovery disabled until manual reset",
+            data={"reason": reason},
+        )
+        if self.sm.state == WatchdogState.RECOVERING:
+            self.sm.fire(WatchdogEvent.FAULT)
+        else:
+            # operating state -> FAULT via RECOVERING (保持转换表合法性)
+            self.sm.fire(WatchdogEvent.CRITICAL)
+            self.sm.fire(WatchdogEvent.FAULT)
+
+    def _register_failure(self, reason: str, config_error: Optional[str] = None) -> None:
         issues = [f"{i.component}: {i.message}" for i in self._last_report.issues] \
             if self._last_report else []
+        if config_error:
+            # 配置错误：不消耗自动恢复次数，直接 FAULT（人工修复配置）
+            self._enter_fault(reason=f"CONFIG_ERROR: {config_error}")
+            return
+        self._consecutive_failures += 1
         self.bus.publish_event(
             EventType.AUTO_RECOVERY_FAILED, source="Watchdog",
             severity=Severity.ERROR,
@@ -291,19 +350,11 @@ class WatchdogEngine:
                   "max": self.cfg.max_recovery_attempts, "issues": issues},
         )
         if self._consecutive_failures >= self.cfg.max_recovery_attempts:
-            self.bus.publish_event(
-                EventType.FAULT_ENTERED, source="Watchdog",
-                severity=Severity.CRITICAL,
-                message=f"FAULT: {self.cfg.max_recovery_attempts} consecutive recovery "
-                        f"failures — automatic recovery disabled until manual reset",
-            )
-            self.sm.fire(WatchdogEvent.FAULT)
+            self._enter_fault(
+                reason=f"{self.cfg.max_recovery_attempts} consecutive recovery failures")
         else:
             # stay in RECOVERING; cooldown applies before the next attempt
-            if self.sm.state == WatchdogState.STARTING:
-                self.sm.fire(WatchdogEvent.CRITICAL)
-            else:
-                self.sm.fire(WatchdogEvent.RECOVERY_FAIL)
+            self.sm.fire(WatchdogEvent.RECOVERY_FAIL)
 
     # ------------------------------------------------------------------
     def _persist_status(self) -> None:
@@ -323,11 +374,7 @@ class WatchdogEngine:
             logger.exception("persisting desired state failed")
 
     def _sync_from_store(self) -> None:
-        """Split deployment: pick up commands written by the web manager.
-
-        The manager-only process (no engine) coordinates through the
-        shared kv_state table: desired_running + reset_fault_requested.
-        """
+        """Split deployment: pick up commands written by the web manager."""
         if self._state_store is None:
             return
         try:
@@ -343,4 +390,3 @@ class WatchdogEngine:
                     self.manual_reset_fault()
         except Exception:  # noqa: BLE001
             logger.exception("syncing state from store failed")
-
