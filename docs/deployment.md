@@ -193,6 +193,16 @@ sudo ./deploy/uninstall.sh
 srsRAN 未安装或不在 PATH。确认 `command -v srsenb` 有输出后重跑脚本；
 自定义路径可手动改 `/etc/systemd/system/srsran-enb.service` 的 ExecStart。
 
+**Q: `sudo ./deploy/install.sh` 报 command not found？**
+v2.0.1 及更早版本克隆的仓库中脚本丢失可执行位。执行：
+
+```bash
+chmod +x deploy/*.sh
+sudo ./deploy/install.sh
+```
+
+或直接 `sudo bash deploy/install.sh`（v2.0.2 起已修复，新克隆无此问题）。
+
 **Q: Web 打得开但 S1 一直 `S1_DOWN`？**
 1. `journalctl -u srsran-enb | grep "S1 Setup"` —— 无输出说明 eNB 没走到 S1 阶段，看 RF 是否打开成功（B210 初始化慢，enb_rf_timeout 默认 90s）
 2. 有 `S1 Setup Failure cause: misc - unknown-PLMN` → epc.conf 的 PLMN 与 enb.conf 不匹配，看门狗会正确地停在 FAULT 等你改配置

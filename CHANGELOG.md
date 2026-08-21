@@ -4,6 +4,16 @@
 版本唯一权威定义在 `backend/app/__init__.py` 的 `__version__`，
 git tag 与 GitHub Release 与之保持一致（API `/api/status` 与前端顶栏均显示该版本）。
 
+## [2.0.2] - 2026-08-21
+
+### 修复
+
+- **install.sh / uninstall.sh 可执行位丢失**：此前上传脚本以 100644 模式入库，
+  导致 Linux 上 `sudo ./deploy/install.sh` 报 `command not found`。
+  现已改为 100755，clone 后可直接执行。
+  旧版本克隆的临时解决办法：`chmod +x deploy/*.sh` 或 `sudo bash deploy/install.sh`
+- deployment.md 常见问题补充上述说明
+
 ## [2.0.1] - 2026-08-21
 
 ### 新增

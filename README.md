@@ -2,7 +2,7 @@
 
 Ubuntu srsRAN 4G 基站服务器的管理、监控与看门狗系统。面向 **ARM64 / RK3588 / Ubuntu 20.04 或 22.04 / USRP B210** 无头（无显示器/键盘）运行环境，日常管理完全通过浏览器完成。
 
-**当前版本：v2.0.1**（变更历史见 [CHANGELOG.md](CHANGELOG.md)；版本号以 `backend/app/__init__.py` 为准，`/api/status` 与前端顶栏均会显示）
+**当前版本：v2.0.2**（变更历史见 [CHANGELOG.md](CHANGELOG.md)；版本号以 `backend/app/__init__.py` 为准，`/api/status` 与前端顶栏均会显示）
 
 ```
 ┌────────────────────────── 浏览器 (PC / 手机) ──────────────────────────┐
